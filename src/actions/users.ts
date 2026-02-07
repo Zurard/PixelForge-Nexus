@@ -92,34 +92,28 @@ export async function updateUserRole(formData: { user_id: string; role: string }
   // Use admin client to bypass RLS
   const adminClient = createAdminClient();
 
-  // Upsert the role
-  const { error } = await adminClient
+  // First delete existing role for this user, then insert the new one
+  // This ensures we replace the role rather than adding a new one
+  const { error: deleteError } = await adminClient
     .from('user_roles')
-    .upsert(
-      { user_id: parsed.data.user_id, role: parsed.data.role },
-      { onConflict: 'user_id,role' }
-    );
+    .delete()
+    .eq('user_id', parsed.data.user_id);
 
-  if (error) {
-    // If upsert failed due to conflict, try update
-    const { error: deleteError } = await adminClient
-      .from('user_roles')
-      .delete()
-      .eq('user_id', parsed.data.user_id);
-
-    if (deleteError) {
-      return { error: deleteError.message };
-    }
-
-    const { error: insertError } = await adminClient
-      .from('user_roles')
-      .insert({ user_id: parsed.data.user_id, role: parsed.data.role });
-
-    if (insertError) {
-      return { error: insertError.message };
-    }
+  if (deleteError) {
+    console.error('Error deleting old role:', deleteError);
+    return { error: deleteError.message };
   }
 
+  const { error: insertError } = await adminClient
+    .from('user_roles')
+    .insert({ user_id: parsed.data.user_id, role: parsed.data.role });
+
+  if (insertError) {
+    console.error('Error inserting new role:', insertError);
+    return { error: insertError.message };
+  }
+
+  revalidatePath('/dashboard');
   revalidatePath('/dashboard/admin/users');
   return { success: true };
 }
