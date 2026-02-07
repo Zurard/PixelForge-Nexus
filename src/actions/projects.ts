@@ -123,13 +123,27 @@ export async function getProjects() {
     .from('projects')
     .select(`
       *,
-      lead:profiles!projects_lead_id_fkey(id, full_name, email),
       project_members(user_id)
     `)
     .order('created_at', { ascending: false });
 
   if (error) {
     return { error: error.message, data: [] };
+  }
+
+  // Fetch all lead profiles in one query
+  const leadIds = (data || []).map(p => p.lead_id).filter(Boolean);
+  let leadProfiles: Record<string, { id: string; full_name: string; email: string }> = {};
+  
+  if (leadIds.length > 0) {
+    const { data: profiles } = await adminClient
+      .from('profiles')
+      .select('id, full_name, email')
+      .in('id', leadIds);
+    
+    (profiles || []).forEach(p => {
+      leadProfiles[p.id] = p;
+    });
   }
 
   // Filter projects based on user role at application level
@@ -147,9 +161,10 @@ export async function getProjects() {
     });
   }
 
-  // Transform to include member count
+  // Transform to include member count and lead info
   const projects = filteredProjects.map((p) => ({
     ...p,
+    lead: p.lead_id ? leadProfiles[p.lead_id] || null : null,
     member_count: p.project_members?.length || 0,
   }));
 
@@ -180,33 +195,66 @@ export async function getProject(projectId: string) {
     .from('projects')
     .select(`
       *,
-      lead:profiles!projects_lead_id_fkey(id, full_name, email),
       project_members(
         id,
         user_id,
-        assigned_at,
-        profile:profiles(id, full_name, email)
+        assigned_at
       )
     `)
     .eq('id', projectId)
     .single();
 
   if (error) {
+    console.error('getProject error:', error);
     if (error.code === 'PGRST116') {
       return { error: 'Project not found', data: null };
     }
     return { error: error.message, data: null };
   }
 
+  // Fetch lead profile separately since lead_id references auth.users, not profiles
+  let lead = null;
+  if (data.lead_id) {
+    const { data: leadProfile } = await adminClient
+      .from('profiles')
+      .select('id, full_name, email')
+      .eq('id', data.lead_id)
+      .single();
+    lead = leadProfile;
+  }
+
+  // Fetch member profiles separately
+  const memberUserIds = (data.project_members || []).map((m: { user_id: string }) => m.user_id);
+  let memberProfiles: Record<string, { id: string; full_name: string; email: string }> = {};
+  
+  if (memberUserIds.length > 0) {
+    const { data: profiles } = await adminClient
+      .from('profiles')
+      .select('id, full_name, email')
+      .in('id', memberUserIds);
+    
+    (profiles || []).forEach(p => {
+      memberProfiles[p.id] = p;
+    });
+  }
+
+  // Attach profile to each member
+  const membersWithProfiles = (data.project_members || []).map((m: { id: string; user_id: string; assigned_at: string }) => ({
+    ...m,
+    profile: memberProfiles[m.user_id] || null,
+  }));
+
+  const projectWithLead = { ...data, lead, project_members: membersWithProfiles };
+
   // Verify user has access to this project
   if (userRole === 'admin') {
     // Admins can access all projects
-    return { data };
+    return { data: projectWithLead };
   }
 
   // Check if user is the lead
   if (data.lead_id === user.id) {
-    return { data };
+    return { data: projectWithLead };
   }
 
   // Check if user is a member
@@ -215,7 +263,7 @@ export async function getProject(projectId: string) {
   );
 
   if (isMember) {
-    return { data };
+    return { data: projectWithLead };
   }
 
   return { error: 'Access denied - you are not a member of this project', data: null };

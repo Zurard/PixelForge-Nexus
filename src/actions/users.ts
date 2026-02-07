@@ -181,17 +181,41 @@ export async function getUsers() {
   // Use admin client to bypass RLS and ensure all users are fetched
   const adminClient = createAdminClient();
 
-  const { data: profiles, error } = await adminClient
+  // Fetch profiles
+  const { data: profiles, error: profilesError } = await adminClient
     .from('profiles')
-    .select(`
-      *,
-      user_roles (role)
-    `)
+    .select('*')
     .order('created_at', { ascending: false });
 
-  if (error) {
-    return { error: error.message, data: [] };
+  if (profilesError) {
+    console.error('getUsers profiles error:', profilesError);
+    return { error: profilesError.message, data: [] };
   }
 
-  return { data: profiles || [] };
+  // Fetch all user roles
+  const { data: roles, error: rolesError } = await adminClient
+    .from('user_roles')
+    .select('user_id, role');
+
+  if (rolesError) {
+    console.error('getUsers roles error:', rolesError);
+    return { error: rolesError.message, data: [] };
+  }
+
+  // Create a map of user_id -> roles
+  const roleMap: Record<string, { role: string }[]> = {};
+  (roles || []).forEach(r => {
+    if (!roleMap[r.user_id]) {
+      roleMap[r.user_id] = [];
+    }
+    roleMap[r.user_id].push({ role: r.role });
+  });
+
+  // Attach roles to each profile
+  const usersWithRoles = (profiles || []).map(profile => ({
+    ...profile,
+    user_roles: roleMap[profile.id] || [],
+  }));
+
+  return { data: usersWithRoles };
 }
