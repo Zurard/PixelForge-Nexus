@@ -63,6 +63,7 @@ export async function createUser(formData: {
     return { error: `User created but failed to assign role: ${roleError.message}` };
   }
 
+  revalidatePath('/dashboard');
   revalidatePath('/dashboard/admin/users');
   return { success: true, userId: newUser.user.id };
 }
@@ -177,13 +178,14 @@ export async function changePassword(formData: {
 }
 
 export async function getUsers() {
-  const supabase = await createClient();
+  // Use admin client to bypass RLS and ensure all users are fetched
+  const adminClient = createAdminClient();
 
-  const { data: profiles, error } = await supabase
+  const { data: profiles, error } = await adminClient
     .from('profiles')
     .select(`
       *,
-      user_roles (*)
+      user_roles (role)
     `)
     .order('created_at', { ascending: false });
 

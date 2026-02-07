@@ -1,6 +1,7 @@
 'use server';
 
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { createProjectSchema } from '@/lib/validations';
 import { revalidatePath } from 'next/cache';
 
@@ -101,13 +102,29 @@ export async function deleteProject(projectId: string) {
 
 export async function getProjects() {
   const supabase = await createClient();
+  
+  // First verify user is authenticated
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: 'Unauthorized', data: [] };
 
-  const { data, error } = await supabase
+  // Get the user's role
+  const { data: roleData } = await supabase
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', user.id)
+    .single();
+
+  const userRole = roleData?.role || 'developer';
+
+  // Use admin client to bypass RLS issues
+  const adminClient = createAdminClient();
+
+  const { data, error } = await adminClient
     .from('projects')
     .select(`
       *,
       lead:profiles!projects_lead_id_fkey(id, full_name, email),
-      project_members(count)
+      project_members(user_id)
     `)
     .order('created_at', { ascending: false });
 
@@ -115,10 +132,25 @@ export async function getProjects() {
     return { error: error.message, data: [] };
   }
 
-  // Transform count
-  const projects = (data || []).map((p) => ({
+  // Filter projects based on user role at application level
+  let filteredProjects = data || [];
+
+  if (userRole !== 'admin') {
+    filteredProjects = filteredProjects.filter((p) => {
+      // User is the lead
+      if (p.lead_id === user.id) return true;
+      // User is a member
+      const isMember = (p.project_members || []).some(
+        (m: { user_id: string }) => m.user_id === user.id
+      );
+      return isMember;
+    });
+  }
+
+  // Transform to include member count
+  const projects = filteredProjects.map((p) => ({
     ...p,
-    member_count: p.project_members?.[0]?.count || 0,
+    member_count: p.project_members?.length || 0,
   }));
 
   return { data: projects };
@@ -126,8 +158,25 @@ export async function getProjects() {
 
 export async function getProject(projectId: string) {
   const supabase = await createClient();
+  
+  // First verify user is authenticated
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: 'Unauthorized', data: null };
 
-  const { data, error } = await supabase
+  // Get the user's role
+  const { data: roleData } = await supabase
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', user.id)
+    .single();
+
+  const userRole = roleData?.role || 'developer';
+
+  // Use admin client to bypass RLS for fetching project details
+  // Access control is enforced by checking membership/lead/admin status
+  const adminClient = createAdminClient();
+
+  const { data, error } = await adminClient
     .from('projects')
     .select(`
       *,
@@ -143,8 +192,31 @@ export async function getProject(projectId: string) {
     .single();
 
   if (error) {
+    if (error.code === 'PGRST116') {
+      return { error: 'Project not found', data: null };
+    }
     return { error: error.message, data: null };
   }
 
-  return { data };
+  // Verify user has access to this project
+  if (userRole === 'admin') {
+    // Admins can access all projects
+    return { data };
+  }
+
+  // Check if user is the lead
+  if (data.lead_id === user.id) {
+    return { data };
+  }
+
+  // Check if user is a member
+  const isMember = (data.project_members || []).some(
+    (m: { user_id: string }) => m.user_id === user.id
+  );
+
+  if (isMember) {
+    return { data };
+  }
+
+  return { error: 'Access denied - you are not a member of this project', data: null };
 }

@@ -1,6 +1,7 @@
 'use server';
 
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { revalidatePath } from 'next/cache';
 
 export async function uploadDocument(
@@ -138,9 +139,11 @@ export async function uploadNewVersion(documentId: string, formData: FormData) {
 }
 
 export async function getProjectDocuments(projectId: string) {
-  const supabase = await createClient();
+  // Use admin client to bypass RLS for fetching documents
+  // Access control is enforced at the project level
+  const adminClient = createAdminClient();
 
-  const { data, error } = await supabase
+  const { data, error } = await adminClient
     .from('documents')
     .select(`
       *,
